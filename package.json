@@ -11,10 +11,12 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "discord.js": "^14.26.4"
+    "discord.js": "^14.26.4",
+    "tmi.js": "^1.8.5"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "@types/tmi.js": "^1.8.6",
     "typescript": "^6.0.3"
   }
 }

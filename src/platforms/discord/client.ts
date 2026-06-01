@@ -1,19 +1,29 @@
-import { Client, GatewayIntentBits } from 'discord.js';
-
 /**
- * Cliente do Discord encapsulando a instância do discord.js.
- * Responsável apenas pela conexão e exposição de eventos brutos.
- * A orquestração (conversão para eventos comuns) é feita pelo Orchestrator.
+ * CLIENTE DO DISCORD
+ * * Intenção: Isolar toda a lógica específica da biblioteca discord.js.
+ * Como estagiários focados em boas práticas, não queremos que o nosso 
+ * orquestrador saiba o que é uma classe "Message" do Discord. O objetivo 
+ * desta classe é conectar ao Discord, ouvir os eventos e convertê-los 
+ * para o nosso formato universal (PlatformEvent).
  */
-export class DiscordClient {
-  /** Instância interna do discord.js */
-  private client: Client;
 
-  /**
-   * Cria uma nova instância do cliente Discord.
-   * @param token - Token de autenticação do bot no Discord
-   */
-  constructor(private readonly token: string) {
+import { Client, GatewayIntentBits, Message } from 'discord.js';
+import { PlatformEvent, EventType } from '../../shared/types/platformEvents';
+
+export class DiscordClient {
+  // Mantemos o cliente do discord em privado por questões de segurança de encapsulamento
+  private client: Client;
+  private token: string;
+
+  // Callbacks injetados pelo orquestrador
+  private messageCallback: ((event: PlatformEvent) => void) | null = null;
+  private errorCallback: ((error: Error) => void) | null = null;
+
+  constructor(token: string) {
+    this.token = token;
+
+    // Inicializamos o cliente apenas com as permissões restritas que precisamos.
+    // Em servidores com 4GB de RAM, pedir intents desnecessários consome mais memória.
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -24,55 +34,70 @@ export class DiscordClient {
   }
 
   /**
-   * Inicializa a conexão com o Discord.
-   * Faz login e deixa o cliente pronto para receber eventos.
+   * Método chamado pelo orquestrador para iniciar a ligação.
    */
   public async initialize(): Promise<void> {
-    try {
-      await this.client.login(this.token);
-    } catch (error) {
-      // Re-throw para que o orchestrator possa tratar
-      throw new Error(`Falha ao conectar ao Discord: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    this.setupListeners();
+    await this.client.login(this.token);
   }
 
   /**
-   * Registra um callback para ser executado quando o bot ficar pronto.
-   * @param callback Função a ser chamada no evento 'ready'
+   * Centraliza o registo de todos os eventos vindos do Discord.
    */
-  public onReady(callback: () => void): void {
-    this.client.on('ready', callback);
+  private setupListeners(): void {
+    // Evento de sucesso de ligação
+    this.client.on('ready', () => {
+      console.log(`[DISCORD] Sessão iniciada com a tag: ${this.client.user?.tag}`);
+    });
+
+    // Evento acionado sempre que uma mensagem é enviada no Discord
+    this.client.on('messageCreate', (message: Message) => {
+      // Ignorar mensagens de outros bots para evitar ciclos infinitos (loops)
+      if (message.author.bot) return;
+
+      // Normalização: Transformamos o dado cru do Discord num PlatformEvent genérico
+      const normalizedEvent: PlatformEvent = {
+        type: EventType.Message,
+        source: 'discord',
+        channel: message.channel.isDMBased() ? 'DM' : message.channel.name,
+        author: message.author.tag,
+        content: message.content,
+        id: message.id,
+        guildId: message.guild?.id ?? undefined
+      };
+
+      // Disparamos a função de callback para enviar a mensagem tratada para o orquestrador
+      if (this.messageCallback) {
+        this.messageCallback(normalizedEvent);
+      }
+    });
+
+    // Captura e repasse de erros
+    this.client.on('error', (error: Error) => {
+      if (this.errorCallback) {
+        this.errorCallback(error);
+      }
+    });
   }
 
   /**
-   * Registra um callback para ser executado quando uma mensagem for criada.
-   * @param callback Função que recebe a mensagem bruta do discord.js
+   * Regista a função que vai ouvir as mensagens.
    */
-  public onMessage(callback: (message: any) => void): void {
-    this.client.on('messageCreate', callback);
+  public onMessage(callback: (message: PlatformEvent) => void): void {
+    this.messageCallback = callback;
   }
 
   /**
-   * Registra um callback para ser executado quando ocorrer um erro de conexão.
-   * @param callback Função que recebe o erro
+   * Regista a função que vai ouvir os erros.
    */
   public onError(callback: (error: Error) => void): void {
-    this.client.on('error', callback);
+    this.errorCallback = callback;
   }
 
   /**
-   * Desconecta e destrói o cliente, liberando recursos.
-   * Importante para ambientes com memória limitada.
+   * Encerra a ligação de forma limpa, essencial para poupar recursos no Linux Server.
    */
   public async destroy(): Promise<void> {
     await this.client.destroy();
-  }
-
-  /**
-   * Getter expoe a instância interna (uso avançado / testes).
-   * Não recomendado para uso comum, pois quebra o encapsulamento.
-   */
-  public getInternalClient(): Client {
-    return this.client;
   }
 }
