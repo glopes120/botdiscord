@@ -1,44 +1,56 @@
 {
-  // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
-    // File Layout
-    // "rootDir": "./src",
-    // "outDir": "./dist",
-
-    // Environment Settings
-    // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
-    "target": "esnext",
-    "types": [],
-    // For nodejs:
-    // "lib": ["esnext"],
-    // "types": ["node"],
-    // and npm install -D @types/node
-
-    // Other Outputs
+    /*
+     * INTENCAO GERAL DO COMPILADOR
+     * Configurado do ponto de vista de um ambiente Node.js estavel.
+     * ES2022 e um alvo moderno mas seguro, e CommonJS e o formato
+     * que o ts-node consegue interpretar nativamente sem problemas.
+     */
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    /*
+     * RESOLUCAO DOS ERROS (TS1295 e TS1484)
+     * Desligamos o verbatimModuleSyntax que estava a causar o bloqueio
+     * com os imports. Adicionamos o esModuleInterop para garantir que
+     * bibliotecas mais antigas (como o tmi.js) e bibliotecas modernas
+     * (como o discord.js) funcionam perfeitamente juntas.
+     */
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    /*
+     * EMISSAO DE FICHEIROS
+     * Mantemos as definicoes de source maps para facilitar o debugging
+     * caso o bot tenha algum erro em producao no Linux Server.
+     */
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,
-
-    // Stricter Typechecking Options
+    /*
+     * REGRAS ESTRITAS (Boas Praticas de Engenharia)
+     * Mantemos as regras rigorosas ativas para evitar bugs em tempo de execucao,
+     * como a verificacao de nulos e o acesso seguro a propriedades.
+     */
+    "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-
-    // Style Options
-    // "noImplicitReturns": true,
-    // "noImplicitOverride": true,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noPropertyAccessFromIndexSignature": true,
-
-    // Recommended Options
-    "strict": true,
-    "jsx": "react-jsx",
-    "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
-    "skipLibCheck": true,
-  }
+    /*
+     * OTIMIZACAO DE COMPILACAO
+     * Ignora a verificacao profunda de tipos dentro da pasta node_modules.
+     * Isto poupa imensa memoria RAM e cpu no teu laptop durante o arranque.
+     */
+    "skipLibCheck": true
+  },
+  /*
+   * ESCOPO DO PROJETO
+   * Diz ao TypeScript para compilar apenas os ficheiros dentro da pasta src,
+   * ignorando ficheiros perdidos na raiz.
+   */
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }

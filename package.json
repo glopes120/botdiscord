@@ -11,7 +11,10 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "openai": "^6.41.0",
     "tmi.js": "^1.8.5"
   },
   "devDependencies": {

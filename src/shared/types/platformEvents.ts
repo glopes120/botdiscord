@@ -21,6 +21,8 @@ export interface PlatformEvent {
   content: string;
   /** ID único da mensagem/evento */
   id?: string;
+  /** ID do canal onde o evento ocorreu */
+  channelId?: string;
   /** ID do guild/servidor (apenas Discord tem) */
   guildId?: string;
   /** Dados adicionais específicos da plataforma */

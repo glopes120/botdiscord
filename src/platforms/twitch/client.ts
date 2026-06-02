@@ -58,14 +58,19 @@ export class TwitchClient {
       if (self) return;
 
       // Normalização dos dados da Twitch
+      // Omitimos o 'id' aqui para não violar a regra de exactOptionalPropertyTypes
       const normalizedEvent: PlatformEvent = {
         type: EventType.Message,
         source: 'twitch',
         channel: channel.replace('#', ''), // Remove a cardinal que a Twitch adiciona aos canais
         author: tags.username ?? 'Anónimo',
-        content: message,
-        id: tags.id
+        content: message
       };
+
+      // Injetamos a propriedade id apenas se a Twitch a tiver enviado com sucesso
+      if (tags.id) {
+        normalizedEvent.id = tags.id;
+      }
 
       if (this.messageCallback) {
         this.messageCallback(normalizedEvent);
@@ -90,5 +95,16 @@ export class TwitchClient {
 
   public async disconnect(): Promise<void> {
     await this.client.disconnect();
+  }
+
+  /**
+   * Envia uma mensagem para o chat da Twitch.
+   */
+  public async sendMessage(content: string): Promise<void> {
+    try {
+      await this.client.say(this.config.channelId, content);
+    } catch (error) {
+      console.error(`[TWITCH] Erro ao enviar mensagem:`, error);
+    }
   }
 }

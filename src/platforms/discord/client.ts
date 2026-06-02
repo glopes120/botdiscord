@@ -55,16 +55,22 @@ export class DiscordClient {
       // Ignorar mensagens de outros bots para evitar ciclos infinitos (loops)
       if (message.author.bot) return;
 
-      // Normalização: Transformamos o dado cru do Discord num PlatformEvent genérico
+      // Normalização: Transformamos o dado cru do Discord num PlatformEvent genérico.
+      // Omitimos o guildId na criação base para respeitar o strict mode do TypeScript.
       const normalizedEvent: PlatformEvent = {
         type: EventType.Message,
         source: 'discord',
         channel: message.channel.isDMBased() ? 'DM' : message.channel.name,
+        channelId: message.channel.id,
         author: message.author.tag,
         content: message.content,
-        id: message.id,
-        guildId: message.guild?.id ?? undefined
+        id: message.id
       };
+
+      // Injetamos a propriedade guildId apenas se a mensagem vier efetivamente de um servidor
+      if (message.guild?.id) {
+        normalizedEvent.guildId = message.guild.id;
+      }
 
       // Disparamos a função de callback para enviar a mensagem tratada para o orquestrador
       if (this.messageCallback) {
@@ -99,5 +105,21 @@ export class DiscordClient {
    */
   public async destroy(): Promise<void> {
     await this.client.destroy();
+  }
+
+  /**
+   * Envia uma mensagem para um canal específico.
+   */
+  public async sendMessage(channelId: string, content: string): Promise<void> {
+    try {
+      const channel = this.client.channels.cache.get(channelId);
+      if (channel && channel.isTextBased() && 'send' in channel) {
+        await channel.send(content);
+      } else {
+        console.warn(`[DISCORD] O canal ${channelId} não foi encontrado ou não permite texto.`);
+      }
+    } catch (error) {
+      console.error(`[DISCORD] Erro ao enviar mensagem para o canal ${channelId}:`, error);
+    }
   }
 }

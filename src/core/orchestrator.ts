@@ -1,424 +1,159 @@
 /**
- * ============================================================================
- * ORCHESTRATOR.TS - Núcleo Central do Bot Discord-Twitch
- * ============================================================================
- *
- * OBJETIVO:
- * Este ficheiro é o cérebro da aplicação. Não contém lógica de plataforma,
- * apenas orquestra a comunicação entre os módulos do Discord e da Twitch.
- *
- * ARQUITETURA:
- * - Segue o padrão de Inversão de Dependências (DIP)
- * - Usa injeção de dependências para facilitar testes e manutenção
- * - Eventos são normalizados através de tipos compartilhados
- *
- * FLUXO DE EXECUÇÃO:
- * 1. Inicia os clientes das duas plataformas
- * 2. Regista os ouvintes (listeners) de eventos
- * 3. Quando um evento ocorre, normaliza os dados
- * 4. Propaga o evento para os handlers apropriados
- *
- * ============================================================================
+ * ORQUESTRADOR CENTRAL
+ * * Intenção: Este é o núcleo da nossa aplicação. Como boas práticas de engenharia de software,
+ * garantimos que a Twitch e o Discord nunca comunicam diretamente (baixo acoplamento).
+ * O Orquestrador consome os eventos normalizados de ambos e decide o que fazer.
+ * * Eficiência: O uso do Promise.all no arranque permite inicializar os serviços
+ * em paralelo, reduzindo o tempo de "cold start" no servidor Linux de 4GB de RAM.
  */
 
-// =============================================================================
-// IMPORTAÇÕES - Apenas módulos essenciais
-// =============================================================================
-
+import * as dotenv from 'dotenv';
 import { DiscordClient } from '../platforms/discord/client';
-import { TwitchClient } from '../platforms/twitch';
-import { PlatformEvent, EventType } from '../shared/types/platformEvents';
-import { Logger } from '../shared/utils/logger';
+import { TwitchClient } from '../platforms/twitch/client';
+import { PlatformEvent } from '../shared/types/platformEvents';
+import { ModerationService } from '../services/moderation';
+import { EconomyService } from '../services/economy';
+import { AiService } from '../services/ai';
+import { VipService } from '../services/vips';
 
-// =============================================================================
-// INTERFACE: IOrchestratorConfig
-// =============================================================================
-/**
- * Define a estrutura da configuração necessária ao orquestrador.
- * Esta interface permite injetar diferentes configurações (dev/prod)
- * sem modificar o código do orquestrador.
- */
-export interface IOrchestratorConfig {
-  discordToken: string;
-  twitchChannelId: string;
-  twitchNickname: string;
-  twitchToken: string;
-}
+// Carregar variáveis de ambiente antes de qualquer lógica de negócio
+dotenv.config();
 
-// =============================================================================
-// INTERFACE: IEventBus
-// =============================================================================
-/**
- * Interface que define o contrato para comunicação de eventos.
- * Permite trocar a implementação do "barramento de eventos" sem
- * impactar os handlers. Útil para testes ou futuras otimizações.
- */
-export interface IEventBus {
-  emit(event: PlatformEvent): void;
-  subscribe(callback: (event: PlatformEvent) => void): void;
-}
+class Orchestrator {
+  private discord: DiscordClient;
+  private twitch: TwitchClient;
+  private moderation: ModerationService;
+  private economy: EconomyService;
+  private ai: AiService;
+  private vips: VipService;
+  private discordBridgeChannelId: string;
 
-// =============================================================================
-// CLASSE: Orchestrator
-// =============================================================================
-/**
- * Classe principal que orquestra a interação entre Discord e Twitch.
- *
- * PRINCÍPIOS DE DESIGN:
- * - SRP (Single Responsibility Principle): Uma única responsabilidade
- * - OCP (Open/Closed Principle): Aberta para extensão, fechada para modificação
- * - DIP (Dependency Inversion Principle): Depende de interfaces, não de implementações
- *
- * ESTADO INTERNO:
- * - discordClient: Cliente do Discord (só leitura após inicialização)
- * - twitchClient: Cliente da Twitch (só leitura após inicialização)
- * - logger: Instância centralizada de logging
- * - eventHandlers: Array de callbacks registados para eventos
- */
-export class Orchestrator {
-  /**
-   * Cliente do Discord. Inicializado assincronamente.
-   * @private
-   */
-  private discordClient: DiscordClient | null = null;
+  constructor() {
+    // Validação estrita (Fail-Fast): Se faltar alguma credencial, o programa
+    const discordToken = process.env.DISCORD_TOKEN;
+    const twitchUsername = process.env.TWITCH_USERNAME;
+    const twitchPassword = process.env.TWITCH_PASSWORD;
+    const twitchChannel = process.env.TWITCH_CHANNEL;
+    const discordChannelId = process.env.DISCORD_CHANNEL_ID;
+    const groqApiKey = process.env.GROQ_API_KEY || '';
 
-  /**
-   * Cliente da Twitch. Inicializado assincronamente.
-   * @private
-   */
-  private twitchClient: TwitchClient | null = null;
+    if (!discordToken || !twitchUsername || !twitchPassword || !twitchChannel || !discordChannelId) {
+      console.error('[ERRO FATAL] Variáveis de ambiente em falta. Verifica o teu ficheiro .env');
+      process.exit(1);
+    }
 
-  /**
-   * Logger centralizado para rastreamento de eventos e debug.
-   * @private
-   */
-  private readonly logger: Logger;
+    this.discordBridgeChannelId = discordChannelId;
+    this.moderation = new ModerationService();
+    this.economy = new EconomyService();
+    this.vips = new VipService();
+    this.ai = new AiService(groqApiKey);
 
-  /**
-   * Array de callbacks para eventos. Implementa o padrão Observer.
-   * @private
-   */
-  private readonly eventHandlers: Array<(event: PlatformEvent) => void> = [];
+    // Instanciar os clientes injetando as credenciais seguras
+    this.discord = new DiscordClient(discordToken);
 
-  /**
-   * Indica se o orquestrador foi inicializado com sucesso.
-   * @private
-   */
-  private isInitialized: boolean = false;
-
-  /**
-   * Construtor do Orchestrator.
-   *
-   * @param config - Configuração contendo tokens e identificadores
-   * @param logger - Instância do logger (injetada para flexibilidade)
-   *
-   * EXEMPLO DE USO:
-   * const orchestrator = new Orchestrator(config, logger);
-   * await orchestrator.start();
-   */
-  constructor(
-    private readonly config: IOrchestratorConfig,
-    logger: Logger
-  ) {
-    this.logger = logger;
-    this.logger.info('Orchestrator instanciado', {
-      component: 'Orchestrator',
-      hasDiscordToken: !!config.discordToken,
-      hasTwitchCredentials: !!(config.twitchToken && config.twitchChannelId)
+    this.twitch = new TwitchClient({
+      nickname: twitchUsername,
+      token: twitchPassword,
+      channelId: twitchChannel
     });
   }
 
-  // =========================================================================
-  // MÉTODO PRINCIPAL: start()
-  // =========================================================================
   /**
-   * Inicia o orquestrador e todos os clientes das plataformas.
-   *
-   * FLUXO:
-   * 1. Valida a configuração
-   * 2. Inicializa o cliente do Discord
-   * 3. Inicializa o cliente da Twitch
-   * 4. Regista os handlers de evento
-   * 5. Marca o estado como inicializado
-   *
-   * @returns Promise que resolve quando todos os clientes estão conectados
-   * @throws Error se a inicialização falhar
+   * Ponto de entrada assíncrono para o ciclo de vida da aplicação.
    */
   public async start(): Promise<void> {
-    this.logger.info('Iniciando orquestrador...', { component: 'Orchestrator' });
+    try {
+      console.log('A iniciar a infraestrutura central...');
 
-    // ------------------------------------------------------------------------
-    // ETAPA 1: Validação de configuração
-    // ------------------------------------------------------------------------
-    this.validateConfig();
+      // 1. Configurar o roteamento de mensagens ANTES de abrir as ligações externas
+      this.setupRouting();
 
-    // ------------------------------------------------------------------------
-    // ETAPA 2: Inicialização do cliente do Discord
-    // ------------------------------------------------------------------------
-    this.logger.info('Inicializando cliente do Discord...', { component: 'Orchestrator' });
-    this.discordClient = new DiscordClient(this.config.discordToken);
-    await this.discordClient.initialize();
-    this.logger.info('Cliente do Discord inicializado com sucesso', { component: 'Orchestrator' });
+      // 2. Ligar ambas as plataformas simultaneamente para otimizar tempo de execução
+      await Promise.all([
+        this.discord.initialize(),
+        this.twitch.initialize()
+      ]);
 
-    // ------------------------------------------------------------------------
-    // ETAPA 3: Inicialização do cliente da Twitch
-    // ------------------------------------------------------------------------
-    this.logger.info('Inicializando cliente da Twitch...', { component: 'Orchestrator' });
-    this.twitchClient = new TwitchClient({
-      channelId: this.config.twitchChannelId,
-      nickname: this.config.twitchNickname,
-      token: this.config.twitchToken
-    });
-    await this.twitchClient.initialize();
-    this.logger.info('Cliente da Twitch inicializado com sucesso', { component: 'Orchestrator' });
+      console.log('[SISTEMA] Orquestrador ativo e a escutar eventos.');
 
-    // ------------------------------------------------------------------------
-    // ETAPA 4: Registo de handlers de evento
-    // ------------------------------------------------------------------------
-    this.registerEventHandlers();
-
-    // ------------------------------------------------------------------------
-    // ETAPA 5: Marcar estado como inicializado
-    // ------------------------------------------------------------------------
-    this.isInitialized = true;
-    this.logger.info('Orquestrador inicializado com sucesso', { component: 'Orchestrator' });
+    } catch (error) {
+      console.error('[ERRO CRÍTICO] Falha no arranque do orquestrador:', error);
+      process.exit(1);
+    }
   }
 
-  // =========================================================================
-  // MÉTODO: stop()
-  // =========================================================================
   /**
-   * Para todos os clientes e limpa os recursos.
-   *
-   * IMPORTANTE: Em ambientes com recursos limitados, é crucial
-   * destruir os clientes correctamente para libertar memória e ports.
+   * Define as regras de negócio: o que acontece quando chega uma mensagem?
    */
-  public async stop(): Promise<void> {
-    this.logger.info('Parando orquestrador...', { component: 'Orchestrator' });
+  private setupRouting(): void {
+    // Quando o cliente do Discord avisa o Orquestrador de uma nova mensagem
+    this.discord.onMessage(async (event: PlatformEvent) => {
+      await this.processMessage(event, 'discord');
+    });
 
-    if (this.discordClient) {
-      await this.discordClient.destroy();
-      this.logger.info('Cliente do Discord desligado', { component: 'Orchestrator' });
+    // Quando o cliente da Twitch avisa o Orquestrador de uma nova mensagem no chat
+    this.twitch.onMessage(async (event: PlatformEvent) => {
+      await this.processMessage(event, 'twitch');
+    });
+
+    // Roteamento global de erros para impedir que a thread do Node.js vá abaixo
+    this.discord.onError((err) => console.error('[Erro Discord]', err));
+    this.twitch.onError((err) => console.error('[Erro Twitch]', err));
+  }
+
+  private async processMessage(event: PlatformEvent, platform: 'discord' | 'twitch'): Promise<void> {
+    // 1. Verificar se é VIP e enviar saudação (só acontece na primeira mensagem da sessão)
+    const vipGreeting = this.vips.checkGreeting(event.author);
+    if (vipGreeting) {
+      this.reply(platform, vipGreeting);
     }
 
-    if (this.twitchClient) {
-      await this.twitchClient.disconnect();
-      this.logger.info('Cliente da Twitch desligado', { component: 'Orchestrator' });
-    }
-
-    this.isInitialized = false;
-    this.logger.info('Orquestrador parado', { component: 'Orchestrator' });
-  }
-
-  // =========================================================================
-  // MÉTODOS DE REGISTO DE HANDLERS
-  // =========================================================================
-  /**
-   * Regista os handlers de evento para ambas as plataformas.
-   *
-   * Padrão Observer: os clients emitem eventos, o orquestrador ouve.
-   * @private
-   */
-  private registerEventHandlers(): void {
-    // Handler para mensagens do Discord
-    this.discordClient!.onMessage((message: PlatformEvent) => {
-      this.handleDiscordMessage(message);
-    });
-
-    // Handler para mensagens da Twitch
-    this.twitchClient!.onMessage((message: PlatformEvent) => {
-      this.handleTwitchMessage(message);
-    });
-
-    // Handler para erros do Discord
-    this.discordClient!.onError((error: Error) => {
-      this.logger.error('Erro no cliente do Discord', {
-        component: 'Orchestrator',
-        error: error.message
-      });
-    });
-
-    // Handler para erros da Twitch
-    this.twitchClient!.onError((error: Error) => {
-      this.logger.error('Erro no cliente da Twitch', {
-        component: 'Orchestrator',
-        error: error.message
-      });
-    });
-
-    this.logger.info('Handlers de evento registados', { component: 'Orchestrator' });
-  }
-
-  // =========================================================================
-  // MÉTODOS DE TRATAMENTO DE EVENTOS
-  // =========================================================================
-  /**
-   * Trata mensagens recebidas do Discord.
-   *
-   * @param message - Mensagem do Discord (já transformada em formato comum)
-   * @private
-   */
-  private handleDiscordMessage(message: PlatformEvent): void {
-    if (!this.isInitialized) {
-      this.logger.warn('Evento recebido antes da inicialização completa', {
-        component: 'Orchestrator',
-        eventType: message.type
-      });
+    // Verificar comandos primeiro
+    if (event.content.startsWith('!pontos')) {
+      const pontos = this.economy.getPoints(event.author);
+      const resposta = `@${event.author}, tens atualmente ${pontos} pontos!`;
+      this.reply(platform, resposta);
       return;
     }
 
-    this.logger.debug('Mensagem do Discord recebida', {
-      component: 'Orchestrator',
-      channel: message.source,
-      author: message.author
-    });
-
-    // Emite o evento para todos os subscribers
-    this.emitEvent(message);
-  }
-
-  /**
-   * Trata mensagens recebidas da Twitch.
-   *
-   * @param message - Mensagem da Twitch (já transformada em formato comum)
-   * @private
-   */
-  private handleTwitchMessage(message: PlatformEvent): void {
-    if (!this.isInitialized) {
-      this.logger.warn('Evento recebido antes da inicialização completa', {
-        component: 'Orchestrator',
-        eventType: message.type
-      });
+    if (event.content.startsWith('!ai ')) {
+      const pergunta = event.content.slice(4).trim();
+      const resposta = await this.ai.askQuestion(pergunta);
+      this.reply(platform, `@${event.author} ${resposta}`);
       return;
     }
 
-    this.logger.debug('Mensagem da Twitch recebida', {
-      component: 'Orchestrator',
-      channel: message.source,
-      author: message.author
-    });
+    // Economia: Dar 1 ponto por mensagem enviada (se não for comando)
+    if (!event.content.startsWith('!')) {
+      this.economy.addPoints(event.author, 1);
+    }
 
-    // Emite o evento para todos os subscribers
-    this.emitEvent(message);
-  }
-
-  // =========================================================================
-  // MÉTODOS DO EVENT BUS
-  // =========================================================================
-  /**
-   * Emite um evento para todos os handlers registados.
-   *
-   * @param event - Evento a ser emitido
-   * @private
-   */
-  private emitEvent(event: PlatformEvent): void {
-    this.eventHandlers.forEach((handler, index) => {
-      try {
-        handler(event);
-      } catch (error) {
-        this.logger.error(`Erro no handler de evento ${index}`, {
-          component: 'Orchestrator',
-          error: error instanceof Error ? error.message : String(error)
-        });
+    // Moderação e Ponte
+    if (platform === 'discord') {
+      if (event.channelId !== this.discordBridgeChannelId) return;
+      if (this.moderation.isClean(event.content)) {
+        this.twitch.sendMessage(`[Discord] ${event.author}: ${event.content}`);
+      } else {
+        console.warn(`[Moderação] Mensagem bloqueada do Discord: ${event.content}`);
       }
-    });
+    } else if (platform === 'twitch') {
+      if (this.moderation.isClean(event.content)) {
+        this.discord.sendMessage(this.discordBridgeChannelId, `**[Twitch] ${event.author}**: ${event.content}`);
+      } else {
+        console.warn(`[Moderação] Mensagem bloqueada da Twitch: ${event.content}`);
+      }
+    }
   }
 
-  /**
-   * Regista um callback para ser notificado de eventos.
-   *
-   * @param callback - Função a ser chamada quando um evento ocorre
-   */
-  public subscribe(callback: (event: PlatformEvent) => void): void {
-    this.eventHandlers.push(callback);
-    this.logger.debug('Novo subscriber registado', { component: 'Orchestrator' });
-  }
-
-  // =========================================================================
-  // MÉTODOS DE VALIDATION
-  // =========================================================================
-  /**
-   * Valida a configuração necessária.
-   *
-   * Em ambientes de produção, falhar cedo é melhor que ter um estado
-   * incerto. Este método lança erros claros para facilitar debugging.
-   *
-   * @throws Error se a configuração for inválida
-   * @private
-   */
-  private validateConfig(): void {
-    const errors: string[] = [];
-
-    if (!this.config.discordToken || this.config.discordToken.trim().length === 0) {
-      errors.push('discordToken é obrigatório');
+  private reply(platform: 'discord' | 'twitch', message: string): void {
+    if (platform === 'discord') {
+      this.discord.sendMessage(this.discordBridgeChannelId, message);
+    } else {
+      this.twitch.sendMessage(message);
     }
-
-    if (!this.config.twitchToken || this.config.twitchToken.trim().length === 0) {
-      errors.push('twitchToken é obrigatório');
-    }
-
-    if (!this.config.twitchChannelId || this.config.twitchChannelId.trim().length === 0) {
-      errors.push('twitchChannelId é obrigatório');
-    }
-
-    if (!this.config.twitchNickname || this.config.twitchNickname.trim().length === 0) {
-      errors.push('twitchNickname é obrigatório');
-    }
-
-    if (errors.length > 0) {
-      const errorMessage = `Configuração inválida: ${errors.join(', ')}`;
-      this.logger.error(errorMessage, { component: 'Orchestrator' });
-      throw new Error(errorMessage);
-    }
-
-    this.logger.debug('Configuração validada com sucesso', { component: 'Orchestrator' });
-  }
-
-  // =========================================================================
-  // MÉTODOS DE ACESSO ÀS PLATAFORMAS
-  // =========================================================================
-  /**
-   * Retorna o cliente do Discord (ou null se não inicializado).
-   * Útil para verificações de saúde ou operações avançadas.
-   */
-  public getDiscordClient(): DiscordClient | null {
-    return this.discordClient;
-  }
-
-  /**
-   * Retorna o cliente da Twitch (ou null se não inicializado).
-   * Útil para verificações de saúde ou operações avançadas.
-   */
-  public getTwitchClient(): TwitchClient | null {
-    return this.twitchClient;
-  }
-
-  /**
-   * Verifica se o orquestrador está inicializado.
-   */
-  public isReady(): boolean {
-    return this.isInitialized;
   }
 }
 
-// =============================================================================
-// FACTORY FUNCTION: createOrchestrator
-// =============================================================================
-/**
- * Factory function para criar uma instância do Orchestrator.
- *
- * ESTE PADRÃO:
- * - Encapsula a lógica de criação
- * - Facilita testes (mock facilmente)
- * - Permite future extensibility (ex: múltiplos orquestradores)
- *
- * @param config - Configuração do orquestrador
- * @param logger - Logger injectado
- * @returns Instância do Orchestrator
- */
-export function createOrchestrator(
-  config: IOrchestratorConfig,
-  logger: Logger
-): Orchestrator {
-  return new Orchestrator(config, logger);
-}
+// Inicializar e arrancar o processo
+const brain = new Orchestrator();
+brain.start();
